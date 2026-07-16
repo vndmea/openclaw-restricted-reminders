@@ -20,6 +20,7 @@ another user's id.
 ## Supported Schedules
 
 - one-shot reminders by absolute ISO datetime or delay in minutes
+- interval reminders such as every 2 minutes
 - daily reminders such as `22:30`
 - weekday reminders
 - weekly reminders

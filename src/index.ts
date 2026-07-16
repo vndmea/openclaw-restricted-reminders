@@ -60,6 +60,7 @@ type PluginConfig = {
 
 type ReminderSchedule =
   | { kind: "once"; at?: string; delayMinutes?: number }
+  | { kind: "interval"; everyMinutes: number; timezone?: string }
   | { kind: "daily"; time: string; timezone?: string }
   | { kind: "weekdays"; time: string; timezone?: string }
   | { kind: "weekly"; dayOfWeek: number; time: string; timezone?: string };
@@ -122,6 +123,15 @@ const scheduleSchema = Type.Union([
         description: "Delay from now, in minutes.",
       }),
     ),
+  }),
+  Type.Object({
+    kind: Type.Literal("interval"),
+    everyMinutes: Type.Integer({
+      minimum: 1,
+      maximum: 59,
+      description: "Repeat every N minutes, for example everyMinutes=2.",
+    }),
+    timezone: Type.Optional(Type.String()),
   }),
   Type.Object({
     kind: Type.Literal("daily"),
@@ -307,6 +317,17 @@ export function scheduleToHostParams(
   }
 
   const tz = schedule.timezone?.trim() || normalized.defaultTimezone;
+  if (schedule.kind === "interval") {
+    const cron =
+      schedule.everyMinutes === 1
+        ? "* * * * *"
+        : `*/${schedule.everyMinutes} * * * *`;
+    return {
+      host: { cron, tz, deleteAfterRun: false },
+      display: `every ${schedule.everyMinutes} minute(s) (${tz})`,
+    };
+  }
+
   const { hour, minute } = parseClockTime(schedule.time);
   if (schedule.kind === "daily") {
     return {

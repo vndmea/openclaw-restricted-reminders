@@ -23,6 +23,18 @@ describe("restricted-reminders", () => {
     });
   });
 
+  it("converts interval reminders to cron", () => {
+    const result = scheduleToHostParams(
+      { kind: "interval", everyMinutes: 2 },
+      { defaultTimezone: "Asia/Shanghai" },
+    );
+    expect(result.host).toMatchObject({
+      cron: "*/2 * * * *",
+      tz: "Asia/Shanghai",
+      deleteAfterRun: false,
+    });
+  });
+
   it("rejects too-soon one-shot reminders", () => {
     expect(() =>
       scheduleToHostParams({ kind: "once", delayMinutes: 1 }, { minDelayMinutes: 5 }),
