@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
@@ -10,12 +11,21 @@ import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 
 const PLUGIN_ID = "restricted-reminders";
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
+const { Lunar } = require("lunar-javascript") as {
+  Lunar: {
+    fromYmd: (year: number, month: number, day: number, leapMonth?: boolean) => {
+      getSolar: () => { getYear: () => number; getMonth: () => number; getDay: () => number; toYmd: () => string };
+    };
+  };
+};
 const DEFAULT_ALLOWED_CHANNELS = [
   "feishu",
   "openclaw-weixin",
   "dingtalk",
   "lightclawbot",
 ];
+const DEFAULT_LUNAR_YEARS_AHEAD = 10;
 
 const configSchema = Type.Object({
   allowedChannels: Type.Optional(
@@ -37,9 +47,16 @@ const configSchema = Type.Object({
   ),
   minDelayMinutes: Type.Optional(
     Type.Integer({
-      minimum: 0,
+      minimum: 1,
       maximum: 1440,
       description: "Minimum delay for one-shot reminders.",
+    }),
+  ),
+  lunarYearsAhead: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      maximum: 30,
+      description: "How many future lunar-yearly occurrences to pre-schedule.",
     }),
   ),
   openclawCommand: Type.Optional(
@@ -55,15 +72,34 @@ type PluginConfig = {
   defaultTimezone?: string;
   maxRemindersPerUser?: number;
   minDelayMinutes?: number;
+  lunarYearsAhead?: number;
   openclawCommand?: string;
 };
 
+type DurationParts = {
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
+};
+
 type ReminderSchedule =
-  | { kind: "once"; at?: string; delayMinutes?: number }
-  | { kind: "interval"; everyMinutes: number; timezone?: string }
+  | { kind: "once"; at?: string; delayMinutes?: number; delaySeconds?: number; duration?: DurationParts }
+  | { kind: "interval"; everyMinutes?: number; everySeconds?: number; duration?: DurationParts; timezone?: string }
   | { kind: "daily"; time: string; timezone?: string }
   | { kind: "weekdays"; time: string; timezone?: string }
-  | { kind: "weekly"; dayOfWeek: number; time: string; timezone?: string };
+  | { kind: "weekly"; dayOfWeek: number; time: string; timezone?: string }
+  | { kind: "monthly"; dayOfMonth: number; time: string; timezone?: string }
+  | { kind: "yearly"; month: number; dayOfMonth: number; time: string; timezone?: string }
+  | {
+      kind: "lunarYearly";
+      lunarMonth: number;
+      lunarDay: number;
+      time: string;
+      leapMonth?: boolean;
+      timezone?: string;
+      yearsAhead?: number;
+    };
 
 type ReminderRecord = {
   id: string;
@@ -75,6 +111,7 @@ type ReminderRecord = {
   sessionId?: string;
   tag: string;
   schedulerJobId?: string;
+  schedulerJobIds?: string[];
   title: string;
   message: string;
   schedule: ReminderSchedule;
@@ -108,6 +145,22 @@ type SchedulerApi = {
   };
 };
 
+type HostParams = {
+  at?: Date;
+  delayMs?: number;
+  cron?: string;
+  tz?: string;
+  every?: string;
+  deleteAfterRun?: boolean;
+};
+
+const durationSchema = Type.Object({
+  days: Type.Optional(Type.Integer({ minimum: 0, maximum: 366 })),
+  hours: Type.Optional(Type.Integer({ minimum: 0, maximum: 23 })),
+  minutes: Type.Optional(Type.Integer({ minimum: 0, maximum: 59 })),
+  seconds: Type.Optional(Type.Integer({ minimum: 0, maximum: 59 })),
+});
+
 const scheduleSchema = Type.Union([
   Type.Object({
     kind: Type.Literal("once"),
@@ -120,17 +173,30 @@ const scheduleSchema = Type.Union([
     delayMinutes: Type.Optional(
       Type.Number({
         minimum: 0,
-        description: "Delay from now, in minutes.",
+        description: "Delay from now, in minutes. Prefer duration for mixed day/hour/minute/second requests.",
       }),
     ),
+    delaySeconds: Type.Optional(
+      Type.Integer({
+        minimum: 0,
+        description: "Delay from now, in seconds.",
+      }),
+    ),
+    duration: Type.Optional(durationSchema),
   }),
   Type.Object({
     kind: Type.Literal("interval"),
-    everyMinutes: Type.Integer({
+    everyMinutes: Type.Optional(Type.Integer({
       minimum: 1,
-      maximum: 59,
+      maximum: 525600,
       description: "Repeat every N minutes, for example everyMinutes=2.",
-    }),
+    })),
+    everySeconds: Type.Optional(Type.Integer({
+      minimum: 60,
+      maximum: 31536000,
+      description: "Repeat every N seconds. Minimum is 60 seconds.",
+    })),
+    duration: Type.Optional(durationSchema),
     timezone: Type.Optional(Type.String()),
   }),
   Type.Object({
@@ -161,6 +227,41 @@ const scheduleSchema = Type.Union([
       description: "24-hour local time, for example 09:00.",
     }),
     timezone: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    kind: Type.Literal("monthly"),
+    dayOfMonth: Type.Integer({
+      minimum: 1,
+      maximum: 31,
+      description: "Calendar day in the month. Months without this day are skipped by cron.",
+    }),
+    time: Type.String({
+      pattern: "^\\d{1,2}:\\d{2}$",
+      description: "24-hour local time, for example 09:58.",
+    }),
+    timezone: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    kind: Type.Literal("yearly"),
+    month: Type.Integer({ minimum: 1, maximum: 12 }),
+    dayOfMonth: Type.Integer({ minimum: 1, maximum: 31 }),
+    time: Type.String({
+      pattern: "^\\d{1,2}:\\d{2}$",
+      description: "24-hour local time, for example 09:58.",
+    }),
+    timezone: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    kind: Type.Literal("lunarYearly"),
+    lunarMonth: Type.Integer({ minimum: 1, maximum: 12 }),
+    lunarDay: Type.Integer({ minimum: 1, maximum: 30 }),
+    time: Type.String({
+      pattern: "^\\d{1,2}:\\d{2}$",
+      description: "24-hour local time, for example 09:58.",
+    }),
+    leapMonth: Type.Optional(Type.Boolean()),
+    timezone: Type.Optional(Type.String()),
+    yearsAhead: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
   }),
 ]);
 
@@ -202,7 +303,8 @@ function normalizeConfig(config: PluginConfig) {
       DEFAULT_ALLOWED_CHANNELS,
     defaultTimezone: config.defaultTimezone?.trim() || "Asia/Shanghai",
     maxRemindersPerUser: config.maxRemindersPerUser ?? 20,
-    minDelayMinutes: config.minDelayMinutes ?? 5,
+    minDelayMinutes: config.minDelayMinutes ?? 1,
+    lunarYearsAhead: config.lunarYearsAhead ?? DEFAULT_LUNAR_YEARS_AHEAD,
     openclawCommand: config.openclawCommand?.trim() || undefined,
   };
 }
@@ -277,28 +379,138 @@ function parseClockTime(time: string) {
   return { hour, minute };
 }
 
+function durationToMs(duration: DurationParts) {
+  const days = duration.days ?? 0;
+  const hours = duration.hours ?? 0;
+  const minutes = duration.minutes ?? 0;
+  const seconds = duration.seconds ?? 0;
+  const total =
+    days * 24 * 60 * 60 * 1000 +
+    hours * 60 * 60 * 1000 +
+    minutes * 60 * 1000 +
+    seconds * 1000;
+  if (!Number.isFinite(total) || total <= 0) {
+    throw new Error("Duration must be greater than zero.");
+  }
+  return total;
+}
+
+function msToDurationParts(ms: number): Required<DurationParts> {
+  let remaining = Math.ceil(ms / 1000);
+  const days = Math.floor(remaining / 86400);
+  remaining -= days * 86400;
+  const hours = Math.floor(remaining / 3600);
+  remaining -= hours * 3600;
+  const minutes = Math.floor(remaining / 60);
+  const seconds = remaining - minutes * 60;
+  return { days, hours, minutes, seconds };
+}
+
+function formatDuration(duration: DurationParts) {
+  const parts = [
+    duration.days ? `${duration.days}d` : "",
+    duration.hours ? `${duration.hours}h` : "",
+    duration.minutes ? `${duration.minutes}m` : "",
+    duration.seconds ? `${duration.seconds}s` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join("") : "0s";
+}
+
+function formatDurationMs(ms: number) {
+  return formatDuration(msToDurationParts(ms));
+}
+
+function formatCliDurationMs(ms: number) {
+  return `${Math.ceil(ms / 1000)}s`;
+}
+
+function resolveOnceDelayMs(schedule: Extract<ReminderSchedule, { kind: "once" }>) {
+  if (schedule.duration) {
+    return durationToMs(schedule.duration);
+  }
+  if (schedule.delaySeconds !== undefined) {
+    return schedule.delaySeconds * 1000;
+  }
+  if (schedule.delayMinutes !== undefined) {
+    return schedule.delayMinutes * 60_000;
+  }
+  return undefined;
+}
+
+function resolveIntervalMs(schedule: Extract<ReminderSchedule, { kind: "interval" }>) {
+  if (schedule.duration) {
+    return durationToMs(schedule.duration);
+  }
+  if (schedule.everySeconds !== undefined) {
+    return schedule.everySeconds * 1000;
+  }
+  if (schedule.everyMinutes !== undefined) {
+    return schedule.everyMinutes * 60_000;
+  }
+  throw new Error("Interval reminders need duration, everySeconds, or everyMinutes.");
+}
+
+function localIso(year: number, month: number, day: number, time: string, timezone: string) {
+  if (timezone !== "Asia/Shanghai") {
+    throw new Error("Absolute generated dates currently require Asia/Shanghai timezone.");
+  }
+  const { hour, minute } = parseClockTime(time);
+  const mm = String(month).padStart(2, "0");
+  const dd = String(day).padStart(2, "0");
+  const hh = String(hour).padStart(2, "0");
+  const mi = String(minute).padStart(2, "0");
+  return new Date(`${year}-${mm}-${dd}T${hh}:${mi}:00+08:00`);
+}
+
+function lunarYearlyHosts(
+  schedule: Extract<ReminderSchedule, { kind: "lunarYearly" }>,
+  config: PluginConfig,
+): { hosts: HostParams[]; displayDates: string[]; timezone: string } {
+  const normalized = normalizeConfig(config);
+  const timezone = schedule.timezone?.trim() || normalized.defaultTimezone;
+  const currentYear = new Date().getFullYear();
+  const yearsAhead = schedule.yearsAhead ?? normalized.lunarYearsAhead;
+  const hosts: HostParams[] = [];
+  const displayDates: string[] = [];
+  for (let offset = 0; offset < yearsAhead; offset += 1) {
+    const lunarYear = currentYear + offset;
+    const solar = Lunar.fromYmd(
+      lunarYear,
+      schedule.lunarMonth,
+      schedule.lunarDay,
+      schedule.leapMonth ?? false,
+    ).getSolar();
+    const at = localIso(solar.getYear(), solar.getMonth(), solar.getDay(), schedule.time, timezone);
+    if (at.getTime() <= Date.now()) {
+      continue;
+    }
+    hosts.push({ at, deleteAfterRun: true });
+    displayDates.push(`${solar.toYmd()} ${schedule.time}`);
+  }
+  if (hosts.length === 0) {
+    throw new Error("Could not resolve any future lunar occurrence.");
+  }
+  return { hosts, displayDates, timezone };
+}
+
 export function scheduleToHostParams(
   schedule: ReminderSchedule,
   config: PluginConfig,
-): { host: { at?: Date; delayMs?: number; cron?: string; tz?: string; deleteAfterRun?: boolean }; display: string } {
+): { host: HostParams; hosts: HostParams[]; display: string } {
   const normalized = normalizeConfig(config);
   if (schedule.kind === "once") {
-    if (schedule.delayMinutes !== undefined) {
-      if (schedule.delayMinutes < normalized.minDelayMinutes) {
+    const delayMs = resolveOnceDelayMs(schedule);
+    if (delayMs !== undefined) {
+      if (delayMs < normalized.minDelayMinutes * 60_000) {
         throw new Error(
           `One-shot reminders must be at least ${normalized.minDelayMinutes} minute(s) in the future.`,
         );
       }
-      return {
-        host: {
-          delayMs: Math.round(schedule.delayMinutes * 60_000),
-          deleteAfterRun: true,
-        },
-        display: `${schedule.delayMinutes} minute(s) from now`,
-      };
+      const host = { delayMs, deleteAfterRun: true };
+      return { host, hosts: [host], display: `${formatDurationMs(delayMs)} from now` };
     }
     if (!schedule.at) {
-      throw new Error("One-shot reminders need either at or delayMinutes.");
+      throw new Error("One-shot reminders need at, delayMinutes, delaySeconds, or duration.");
     }
     const at = new Date(schedule.at);
     if (Number.isNaN(at.getTime())) {
@@ -310,40 +522,50 @@ export function scheduleToHostParams(
         `One-shot reminders must be at least ${normalized.minDelayMinutes} minute(s) in the future.`,
       );
     }
-    return {
-      host: { at, deleteAfterRun: true },
-      display: at.toISOString(),
-    };
+    const host = { at, deleteAfterRun: true };
+    return { host, hosts: [host], display: at.toISOString() };
   }
 
   const tz = schedule.timezone?.trim() || normalized.defaultTimezone;
   if (schedule.kind === "interval") {
-    const cron =
-      schedule.everyMinutes === 1
-        ? "* * * * *"
-        : `*/${schedule.everyMinutes} * * * *`;
-    return {
-      host: { cron, tz, deleteAfterRun: false },
-      display: `every ${schedule.everyMinutes} minute(s) (${tz})`,
+    const intervalMs = resolveIntervalMs(schedule);
+    if (intervalMs < 60_000) {
+      throw new Error("Interval reminders must be at least 1 minute apart.");
+    }
+    const host = {
+      every: formatCliDurationMs(intervalMs),
+      tz,
+      deleteAfterRun: false,
     };
+    return { host, hosts: [host], display: `every ${formatDurationMs(intervalMs)} (${tz})` };
   }
 
   const { hour, minute } = parseClockTime(schedule.time);
   if (schedule.kind === "daily") {
-    return {
-      host: { cron: `${minute} ${hour} * * *`, tz, deleteAfterRun: false },
-      display: `every day at ${schedule.time} (${tz})`,
-    };
+    const host = { cron: `${minute} ${hour} * * *`, tz, deleteAfterRun: false };
+    return { host, hosts: [host], display: `every day at ${schedule.time} (${tz})` };
   }
   if (schedule.kind === "weekdays") {
-    return {
-      host: { cron: `${minute} ${hour} * * 1-5`, tz, deleteAfterRun: false },
-      display: `weekdays at ${schedule.time} (${tz})`,
-    };
+    const host = { cron: `${minute} ${hour} * * 1-5`, tz, deleteAfterRun: false };
+    return { host, hosts: [host], display: `weekdays at ${schedule.time} (${tz})` };
   }
+  if (schedule.kind === "weekly") {
+    const host = { cron: `${minute} ${hour} * * ${schedule.dayOfWeek}`, tz, deleteAfterRun: false };
+    return { host, hosts: [host], display: `weekly on day ${schedule.dayOfWeek} at ${schedule.time} (${tz})` };
+  }
+  if (schedule.kind === "monthly") {
+    const host = { cron: `${minute} ${hour} ${schedule.dayOfMonth} * *`, tz, deleteAfterRun: false };
+    return { host, hosts: [host], display: `monthly on day ${schedule.dayOfMonth} at ${schedule.time} (${tz})` };
+  }
+  if (schedule.kind === "yearly") {
+    const host = { cron: `${minute} ${hour} ${schedule.dayOfMonth} ${schedule.month} *`, tz, deleteAfterRun: false };
+    return { host, hosts: [host], display: `yearly on ${schedule.month}-${schedule.dayOfMonth} at ${schedule.time} (${tz})` };
+  }
+  const lunar = lunarYearlyHosts(schedule, config);
   return {
-    host: { cron: `${minute} ${hour} * * ${schedule.dayOfWeek}`, tz, deleteAfterRun: false },
-    display: `weekly on day ${schedule.dayOfWeek} at ${schedule.time} (${tz})`,
+    host: lunar.hosts[0],
+    hosts: lunar.hosts,
+    display: `lunar yearly on ${schedule.lunarMonth}-${schedule.lunarDay} at ${schedule.time} (${lunar.timezone}); scheduled ${lunar.displayDates.length} occurrence(s): ${lunar.displayDates.slice(0, 3).join(", ")}${lunar.displayDates.length > 3 ? ", ..." : ""}`,
   };
 }
 
@@ -397,7 +619,7 @@ async function addReminderViaCli(
   params: { title: string; message: string; schedule: ReminderSchedule },
   config: PluginConfig,
   identity: Identity,
-  host: { at?: Date; delayMs?: number; cron?: string; tz?: string; deleteAfterRun?: boolean },
+  host: HostParams,
 ) {
   const args = [
     "cron",
@@ -419,8 +641,13 @@ async function addReminderViaCli(
   if (identity.agentId) {
     args.push("--agent", identity.agentId);
   }
-  if (host.delayMs !== undefined) {
-    args.push("--at", `+${Math.ceil(host.delayMs / 60_000)}m`, "--delete-after-run");
+  if (host.every) {
+    args.push("--every", host.every, "--keep-after-run");
+    if (host.tz) {
+      args.push("--tz", host.tz);
+    }
+  } else if (host.delayMs !== undefined) {
+    args.push("--at", `+${formatCliDurationMs(host.delayMs)}`, "--delete-after-run");
   } else if (host.at) {
     args.push("--at", host.at.toISOString(), "--delete-after-run");
   } else if (host.cron) {
@@ -432,6 +659,31 @@ async function addReminderViaCli(
     throw new Error("Unsupported reminder schedule.");
   }
   return parseCronAddJson(await runOpenClawCli(config, args));
+}
+
+async function addReminderHost(
+  params: { title: string; message: string; schedule: ReminderSchedule },
+  config: PluginConfig,
+  api: SchedulerApi,
+  identity: Identity,
+  host: HostParams,
+  tag: string,
+) {
+  if (!host.every && api.session.workflow.scheduleSessionTurn) {
+    const scheduled = await api.session.workflow.scheduleSessionTurn({
+      sessionKey: identity.sessionKey,
+      agentId: identity.agentId,
+      message: buildReminderMessage(params.title, params.message),
+      deliveryMode: "announce",
+      name: `RR ${tag.replace(/^rr_/, "")} ${truncateTitle(params.title)}`,
+      tag,
+      ...host,
+    });
+    if (scheduled?.id) {
+      return scheduled.id;
+    }
+  }
+  return addReminderViaCli(params, config, identity, host);
 }
 
 function formatRecord(record: ReminderRecord) {
@@ -457,22 +709,13 @@ async function addReminder(
 
   const id = randomUUID().slice(0, 8);
   const tag = `rr_${id}`;
-  const { host, display } = scheduleToHostParams(params.schedule, config);
-  const schedulerJobId = api.session.workflow.scheduleSessionTurn
-    ? (
-        await api.session.workflow.scheduleSessionTurn({
-          sessionKey: identity.sessionKey,
-          agentId: identity.agentId,
-          message: buildReminderMessage(params.title, params.message),
-          deliveryMode: "announce",
-          name: `RR ${id} ${truncateTitle(params.title)}`,
-          tag,
-          ...host,
-        })
-      )?.id
-    : await addReminderViaCli(params, config, identity, host);
+  const { hosts, display } = scheduleToHostParams(params.schedule, config);
+  const schedulerJobIds: string[] = [];
+  for (const host of hosts) {
+    schedulerJobIds.push(await addReminderHost(params, config, api, identity, host, tag));
+  }
 
-  if (!schedulerJobId) {
+  if (schedulerJobIds.length === 0) {
     throw new Error("OpenClaw scheduler did not return a job id.");
   }
 
@@ -486,7 +729,8 @@ async function addReminder(
     sessionKey: identity.sessionKey,
     sessionId: identity.sessionId,
     tag,
-    schedulerJobId,
+    schedulerJobId: schedulerJobIds[0],
+    schedulerJobIds,
     title: truncateTitle(params.title),
     message: params.message.trim(),
     schedule: params.schedule,
@@ -527,8 +771,10 @@ async function removeReminder(
       sessionKey: record.sessionKey,
       tag: record.tag,
     });
-  } else if (record.schedulerJobId) {
-    await runOpenClawCli(config, ["cron", "rm", record.schedulerJobId, "--json"]);
+  } else if (record.schedulerJobIds?.length || record.schedulerJobId) {
+    for (const jobId of record.schedulerJobIds ?? [record.schedulerJobId!]) {
+      await runOpenClawCli(config, ["cron", "rm", jobId, "--json"]);
+    }
   } else {
     throw new Error("OpenClaw did not expose reminder removal and no cron job id is stored.");
   }
@@ -567,7 +813,7 @@ export default defineToolPlugin({
           name: "restricted_reminders_add",
           label: "Add Restricted Reminder",
           description:
-            "Create a reminder for the current chat sender only. For daily 22:30 requests, use schedule.kind=daily and time=22:30; if today's time has passed, the recurring schedule naturally starts at the next future occurrence.",
+            "Create a reminder for the current chat sender only. Use once.at for concrete times such as next Monday 09:58, once.duration for relative requests such as 2 days 3 hours 4 minutes 5 seconds later, interval.duration for every-N-duration requests, daily/weekdays/weekly/monthly/yearly for solar recurring requests, and lunarYearly for Chinese lunar yearly requests. For daily 22:30 requests, use schedule.kind=daily and time=22:30; if today's time has passed, the recurring schedule naturally starts at the next future occurrence.",
           parameters: addSchema,
           async execute(_toolCallId: string, params: { title: string; message: string; schedule: ReminderSchedule }) {
             try {

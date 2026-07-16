@@ -1,11 +1,19 @@
 # OpenClaw Restricted Reminders
 
+English | [简体中文](https://github.com/vndmea/openclaw-restricted-reminders/blob/main/README.zh-CN.md)
+
 Restricted per-user reminder tools for OpenClaw chat channels.
 
-The plugin lets an agent create, list, and remove reminders for the current
-chat sender only. It is intended for public or semi-public WeChat, Feishu,
-DingTalk, and LightClawBot access where ordinary users should not receive the
-core `cron`, `gateway`, or `nodes` tools.
+## What is it?
+
+OpenClaw Restricted Reminders lets an agent create, list, and remove reminders for the current chat sender only. It is designed for WeChat, Feishu, DingTalk, and LightClawBot deployments where ordinary users should be able to manage their own reminders without receiving the powerful core `cron`, `gateway`, or `nodes` tools.
+
+The plugin keeps the security boundary small:
+
+- Tool calls never accept another user's channel id, recipient id, or sender id.
+- Reminder ownership is derived from OpenClaw's trusted inbound tool context.
+- Listing and removal only operate on reminders owned by the current sender.
+- Actual scheduling is delegated to OpenClaw's scheduler or cron backend.
 
 ## Tools
 
@@ -13,29 +21,33 @@ core `cron`, `gateway`, or `nodes` tools.
 - `restricted_reminders_list`
 - `restricted_reminders_remove`
 
-The tools are registered only when OpenClaw provides a trusted inbound channel,
-sender id, and session key. Tool arguments never accept `channel`, `to`, or
-another user's id.
+The tools are registered only when OpenClaw provides a trusted inbound channel, sender id, and session key.
 
 ## Supported Schedules
 
-- one-shot reminders by absolute ISO datetime or delay in minutes
-- interval reminders such as every 2 minutes
-- daily reminders such as `22:30`
-- weekday reminders
-- weekly reminders
+| Request shape | Structured schedule |
+| --- | --- |
+| "Remind me next Monday at 09:58" | `once.at` |
+| "Remind me in 2 days 3 hours 4 minutes 5 seconds" | `once.duration` |
+| "Remind me in 90 seconds" | `once.delaySeconds` |
+| "Remind me every 2 minutes" | `interval.everyMinutes` or `interval.duration` |
+| "Remind me every 2 hours 30 minutes" | `interval.duration` |
+| "Remind me every day at 22:30" | `daily` |
+| "Remind me every weekday at 09:00" | `weekdays` |
+| "Remind me every Monday at 09:58" | `weekly` |
+| "Remind me on the 22nd of every month at 09:58" | `monthly` |
+| "Remind me every year on March 22 at 09:58" | `yearly` |
+| "Remind me every lunar March 22 at 09:58" | `lunarYearly` |
 
-For “每天 22:30”, the plugin creates cron `30 22 * * *` in the configured
-timezone. If today's 22:30 has already passed, OpenClaw naturally waits for the
-next future occurrence.
+For lunar yearly reminders, the plugin uses [`lunar-javascript`](https://github.com/6tail/lunar-javascript) to convert future lunar dates into concrete solar dates, then pre-schedules one-shot jobs for the configured number of future years.
 
 ## Build
 
 ```bash
 npm install
-npm run plugin:build
-npm run plugin:validate
 npm test
+npm run build
+npm run plugin:validate
 ```
 
 ## Install
@@ -50,9 +62,11 @@ openclaw gateway restart
 Then ask through an allowed channel:
 
 ```text
-每天22:30提醒我复盘股票
-我有哪些提醒？
-取消股票复盘提醒
+Remind me next Monday at 09:58 to grab coupons
+Remind me in 2 days 3 hours 4 minutes 5 seconds to check the server
+Remind me every 2 minutes to report the time
+What reminders do I have?
+Cancel the coupon reminder
 ```
 
 ## Configuration
@@ -66,11 +80,11 @@ Optional config:
       "allowedChannels": ["feishu", "openclaw-weixin", "dingtalk", "lightclawbot"],
       "defaultTimezone": "Asia/Shanghai",
       "maxRemindersPerUser": 20,
-      "minDelayMinutes": 5
+      "minDelayMinutes": 1,
+      "lunarYearsAhead": 10
     }
   }
 }
 ```
 
-OpenClaw config shape can vary by installation path; use `openclaw config
-patch` or the OpenClaw control UI to apply plugin config in your environment.
+OpenClaw config shape can vary by installation path. Use `openclaw config patch` or the OpenClaw control UI to apply plugin config in your environment.
