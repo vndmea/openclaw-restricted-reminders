@@ -1,0 +1,48 @@
+{
+  "id": "restricted-reminders",
+  "name": "Restricted Reminders",
+  "description": "Let chat users create, list, and remove only their own scheduled reminders without exposing cron, gateway, or nodes.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "allowedChannels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Channel ids where restricted reminder tools are exposed."
+      },
+      "defaultTimezone": {
+        "type": "string",
+        "description": "Default IANA timezone used for recurring reminders."
+      },
+      "maxRemindersPerUser": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200,
+        "description": "Maximum active reminders one sender can own."
+      },
+      "minDelayMinutes": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1440,
+        "description": "Minimum delay for one-shot reminders."
+      },
+      "openclawCommand": {
+        "type": "string",
+        "description": "Optional OpenClaw CLI command or JS entry used as fallback when plugin scheduler APIs are unavailable."
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "restricted_reminders_add",
+      "restricted_reminders_list",
+      "restricted_reminders_remove"
+    ]
+  }
+}
