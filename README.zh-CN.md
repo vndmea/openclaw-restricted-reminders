@@ -1,6 +1,6 @@
 # OpenClaw Restricted Reminders
 
-[English](https://github.com/vndmea/openclaw-restricted-reminders/blob/main/README.md) | 简体中文
+[English](https://github.com/vndmea/openclaw-restricted-reminders/blob/master/README.md) | 简体中文
 
 面向 OpenClaw 聊天渠道的受限提醒插件。
 

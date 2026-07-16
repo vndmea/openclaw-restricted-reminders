@@ -1,6 +1,6 @@
 # OpenClaw Restricted Reminders
 
-English | [简体中文](https://github.com/vndmea/openclaw-restricted-reminders/blob/main/README.zh-CN.md)
+English | [简体中文](https://github.com/vndmea/openclaw-restricted-reminders/blob/master/README.zh-CN.md)
 
 Restricted per-user reminder tools for OpenClaw chat channels.
 
