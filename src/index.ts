@@ -754,10 +754,9 @@ export function scheduleToHostParams(
     }
     const host = {
       every: formatCliDurationMs(intervalMs),
-      tz,
       deleteAfterRun: false,
     };
-    return { host, hosts: [host], display: `every ${formatDurationMs(intervalMs)} (${tz})` };
+    return { host, hosts: [host], display: `every ${formatDurationMs(intervalMs)}` };
   }
 
   const { hour, minute } = parseClockTime(schedule.time);

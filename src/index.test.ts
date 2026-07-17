@@ -30,9 +30,9 @@ describe("restricted-reminders", () => {
     );
     expect(result.host).toMatchObject({
       every: "120s",
-      tz: "Asia/Shanghai",
       deleteAfterRun: false,
     });
+    expect(result.host).not.toHaveProperty("tz");
   });
 
   it("allows one-shot reminders starting at one minute by default", () => {
