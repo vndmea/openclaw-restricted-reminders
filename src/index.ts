@@ -21,9 +21,18 @@ const { Lunar } = require("lunar-javascript") as {
 };
 const DEFAULT_ALLOWED_CHANNELS = [
   "feishu",
+  "lark",
+  "openclaw-lark",
+  "openclaw-feishu",
+  "weixin",
+  "wechat",
   "openclaw-weixin",
+  "openclaw-wechat",
   "dingtalk",
+  "dingding",
+  "openclaw-dingtalk",
   "lightclawbot",
+  "openclaw-lightclawbot",
 ];
 const DEFAULT_LUNAR_YEARS_AHEAD = 10;
 
@@ -91,6 +100,14 @@ type ReminderSchedule =
   | { kind: "weekly"; dayOfWeek: number; time: string; timezone?: string }
   | { kind: "monthly"; dayOfMonth: number; time: string; timezone?: string }
   | { kind: "yearly"; month: number; dayOfMonth: number; time: string; timezone?: string }
+  | {
+      kind: "lunarOnce";
+      lunarMonth: number;
+      lunarDay: number;
+      time: string;
+      leapMonth?: boolean;
+      timezone?: string;
+    }
   | {
       kind: "lunarYearly";
       lunarMonth: number;
@@ -252,6 +269,17 @@ const scheduleSchema = Type.Union([
     timezone: Type.Optional(Type.String()),
   }),
   Type.Object({
+    kind: Type.Literal("lunarOnce"),
+    lunarMonth: Type.Integer({ minimum: 1, maximum: 12 }),
+    lunarDay: Type.Integer({ minimum: 1, maximum: 30 }),
+    time: Type.String({
+      pattern: "^\\d{1,2}:\\d{2}$",
+      description: "24-hour local time, for example 11:00.",
+    }),
+    leapMonth: Type.Optional(Type.Boolean()),
+    timezone: Type.Optional(Type.String()),
+  }),
+  Type.Object({
     kind: Type.Literal("lunarYearly"),
     lunarMonth: Type.Integer({ minimum: 1, maximum: 12 }),
     lunarDay: Type.Integer({ minimum: 1, maximum: 30 }),
@@ -299,7 +327,7 @@ function textResult(text: string, details?: unknown) {
 function normalizeConfig(config: PluginConfig) {
   return {
     allowedChannels:
-      config.allowedChannels?.filter((entry) => entry.trim()) ??
+      config.allowedChannels?.map(normalizeChannelKey).filter(Boolean) ??
       DEFAULT_ALLOWED_CHANNELS,
     defaultTimezone: config.defaultTimezone?.trim() || "Asia/Shanghai",
     maxRemindersPerUser: config.maxRemindersPerUser ?? 20,
@@ -309,31 +337,148 @@ function normalizeConfig(config: PluginConfig) {
   };
 }
 
-function resolveIdentity(ctx: OpenClawPluginToolContext): Identity | null {
-  const channel = ctx.messageChannel?.trim();
-  const senderId = ctx.requesterSenderId?.trim();
-  const sessionKey = ctx.sessionKey?.trim();
+function trimString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function firstString(...values: unknown[]) {
+  for (const value of values) {
+    const trimmed = trimString(value);
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return undefined;
+}
+
+function normalizeChannelKey(channel: string) {
+  return channel.trim().toLowerCase();
+}
+
+function channelAliases(channel: string) {
+  const normalized = normalizeChannelKey(channel);
+  const aliases = new Set<string>([normalized]);
+  if (normalized.startsWith("openclaw-")) {
+    aliases.add(normalized.slice("openclaw-".length));
+  } else {
+    aliases.add(`openclaw-${normalized}`);
+  }
+
+  if (["feishu", "lark", "openclaw-feishu", "openclaw-lark"].includes(normalized)) {
+    aliases.add("feishu");
+    aliases.add("lark");
+    aliases.add("openclaw-feishu");
+    aliases.add("openclaw-lark");
+  }
+  if (["weixin", "wechat", "openclaw-weixin", "openclaw-wechat"].includes(normalized)) {
+    aliases.add("weixin");
+    aliases.add("wechat");
+    aliases.add("openclaw-weixin");
+    aliases.add("openclaw-wechat");
+  }
+  if (["dingtalk", "dingding", "openclaw-dingtalk"].includes(normalized)) {
+    aliases.add("dingtalk");
+    aliases.add("dingding");
+    aliases.add("openclaw-dingtalk");
+  }
+  if (["lightclawbot", "lightclaw-bot", "openclaw-lightclawbot"].includes(normalized)) {
+    aliases.add("lightclawbot");
+    aliases.add("lightclaw-bot");
+    aliases.add("openclaw-lightclawbot");
+  }
+  return [...aliases];
+}
+
+function resolveContextChannel(ctx: OpenClawPluginToolContext) {
+  const raw = ctx as Record<string, any>;
+  return firstString(
+    ctx.messageChannel,
+    raw.messageProvider,
+    raw.currentChannelProvider,
+    raw.channelProvider,
+    raw.channel,
+    raw.toolContext?.messageProvider,
+    raw.toolContext?.currentChannelProvider,
+    raw.deliveryContext?.messageChannel,
+    raw.deliveryContext?.messageProvider,
+    raw.deliveryContext?.currentChannelProvider,
+  );
+}
+
+export function resolveIdentity(ctx: OpenClawPluginToolContext): Identity | null {
+  const raw = ctx as Record<string, any>;
+  const channel = resolveContextChannel(ctx);
+  const senderId = firstString(
+    ctx.requesterSenderId,
+    raw.senderId,
+    raw.currentSenderId,
+    raw.fromUserId,
+    raw.userId,
+    raw.requester?.senderId,
+    raw.message?.senderId,
+    raw.toolContext?.requesterSenderId,
+    raw.toolContext?.senderId,
+    raw.deliveryContext?.requesterSenderId,
+    raw.deliveryContext?.senderId,
+  );
+  const sessionKey = firstString(
+    ctx.sessionKey,
+    raw.currentSessionKey,
+    raw.conversationSessionKey,
+    raw.toolContext?.sessionKey,
+    raw.deliveryContext?.sessionKey,
+  );
   if (!channel || !senderId || !sessionKey) {
     return null;
   }
-  const accountId = ctx.agentAccountId?.trim() || undefined;
-  const userKey = [channel, accountId ?? "default", senderId].join("|");
+  const normalizedChannel = normalizeChannelKey(channel);
+  const accountId = firstString(
+    ctx.agentAccountId,
+    raw.accountId,
+    raw.currentAccountId,
+    raw.agentAccountId,
+    raw.toolContext?.agentAccountId,
+    raw.deliveryContext?.accountId,
+  );
+  const userKey = [normalizedChannel, accountId ?? "default", senderId].join("|");
   return {
     userKey,
-    channel,
+    channel: normalizedChannel,
     accountId,
     senderId,
     sessionKey,
-    sessionId: ctx.sessionId,
-    agentId: ctx.agentId,
+    sessionId: firstString(ctx.sessionId, raw.currentSessionId, raw.toolContext?.sessionId),
+    agentId: firstString(ctx.agentId, raw.currentAgentId, raw.toolContext?.agentId),
   };
 }
 
-function isAllowedIdentity(identity: Identity | null, config: PluginConfig) {
-  if (!identity) {
-    return false;
+function isAllowedChannel(channel: string, config: PluginConfig) {
+  const allowed = new Set(normalizeConfig(config).allowedChannels.map(normalizeChannelKey));
+  return channelAliases(channel).some((alias) => allowed.has(alias));
+}
+
+function isAllowedIdentity(identity: Identity, config: PluginConfig) {
+  return isAllowedChannel(identity.channel, config);
+}
+
+export function shouldExposeReminderTools(ctx: OpenClawPluginToolContext, config: PluginConfig) {
+  const identity = resolveIdentity(ctx);
+  if (identity) {
+    return isAllowedIdentity(identity, config);
   }
-  return normalizeConfig(config).allowedChannels.includes(identity.channel);
+  const channel = resolveContextChannel(ctx);
+  return !channel || isAllowedChannel(channel, config);
+}
+
+function requireAllowedIdentity(ctx: OpenClawPluginToolContext, config: PluginConfig) {
+  const identity = resolveIdentity(ctx);
+  if (!identity) {
+    throw new Error("当前渠道缺少可信发送者身份，无法安全创建或管理提醒。");
+  }
+  if (!isAllowedIdentity(identity, config)) {
+    throw new Error(`当前渠道 ${identity.channel} 未启用提醒权限。`);
+  }
+  return identity;
 }
 
 function resolveStorePath() {
@@ -462,6 +607,48 @@ function localIso(year: number, month: number, day: number, time: string, timezo
   return new Date(`${year}-${mm}-${dd}T${hh}:${mi}:00+08:00`);
 }
 
+function lunarToSolarDate(
+  lunarYear: number,
+  lunarMonth: number,
+  lunarDay: number,
+  time: string,
+  timezone: string,
+  leapMonth = false,
+) {
+  const solar = Lunar.fromYmd(lunarYear, lunarMonth, lunarDay, leapMonth).getSolar();
+  return {
+    at: localIso(solar.getYear(), solar.getMonth(), solar.getDay(), time, timezone),
+    display: `${solar.toYmd()} ${time}`,
+  };
+}
+
+function lunarOnceHost(
+  schedule: Extract<ReminderSchedule, { kind: "lunarOnce" }>,
+  config: PluginConfig,
+): { host: HostParams; displayDate: string; timezone: string } {
+  const normalized = normalizeConfig(config);
+  const timezone = schedule.timezone?.trim() || normalized.defaultTimezone;
+  const currentYear = new Date().getFullYear();
+  for (const lunarYear of [currentYear, currentYear + 1]) {
+    const resolved = lunarToSolarDate(
+      lunarYear,
+      schedule.lunarMonth,
+      schedule.lunarDay,
+      schedule.time,
+      timezone,
+      schedule.leapMonth ?? false,
+    );
+    if (resolved.at.getTime() > Date.now()) {
+      return {
+        host: { at: resolved.at, deleteAfterRun: true },
+        displayDate: resolved.display,
+        timezone,
+      };
+    }
+  }
+  throw new Error("Could not resolve a future lunar occurrence.");
+}
+
 function lunarYearlyHosts(
   schedule: Extract<ReminderSchedule, { kind: "lunarYearly" }>,
   config: PluginConfig,
@@ -474,18 +661,20 @@ function lunarYearlyHosts(
   const displayDates: string[] = [];
   for (let offset = 0; offset < yearsAhead; offset += 1) {
     const lunarYear = currentYear + offset;
-    const solar = Lunar.fromYmd(
+    const resolved = lunarToSolarDate(
       lunarYear,
       schedule.lunarMonth,
       schedule.lunarDay,
+      schedule.time,
+      timezone,
       schedule.leapMonth ?? false,
-    ).getSolar();
-    const at = localIso(solar.getYear(), solar.getMonth(), solar.getDay(), schedule.time, timezone);
+    );
+    const at = resolved.at;
     if (at.getTime() <= Date.now()) {
       continue;
     }
     hosts.push({ at, deleteAfterRun: true });
-    displayDates.push(`${solar.toYmd()} ${schedule.time}`);
+    displayDates.push(resolved.display);
   }
   if (hosts.length === 0) {
     throw new Error("Could not resolve any future lunar occurrence.");
@@ -560,6 +749,14 @@ export function scheduleToHostParams(
   if (schedule.kind === "yearly") {
     const host = { cron: `${minute} ${hour} ${schedule.dayOfMonth} ${schedule.month} *`, tz, deleteAfterRun: false };
     return { host, hosts: [host], display: `yearly on ${schedule.month}-${schedule.dayOfMonth} at ${schedule.time} (${tz})` };
+  }
+  if (schedule.kind === "lunarOnce") {
+    const lunar = lunarOnceHost(schedule, config);
+    return {
+      host: lunar.host,
+      hosts: [lunar.host],
+      display: `lunar once on ${schedule.lunarMonth}-${schedule.lunarDay} at ${schedule.time} (${lunar.timezone}); scheduled ${lunar.displayDate}`,
+    };
   }
   const lunar = lunarYearlyHosts(schedule, config);
   return {
@@ -805,18 +1002,18 @@ export default defineToolPlugin({
         "Create a reminder for the current chat sender only. Use this instead of cron for user reminder or scheduled review requests in WeChat, Feishu, DingTalk, or LightClawBot. Do not ask for or pass channel/user ids.",
       parameters: addSchema,
       factory({ api, config, toolContext }) {
-        const identity = resolveIdentity(toolContext);
-        if (!identity || !isAllowedIdentity(identity, config)) {
+        if (!shouldExposeReminderTools(toolContext, config)) {
           return null;
         }
         return {
           name: "restricted_reminders_add",
           label: "Add Restricted Reminder",
           description:
-            "Create a reminder for the current chat sender only. Use once.at for concrete times such as next Monday 09:58, once.duration for relative requests such as 2 days 3 hours 4 minutes 5 seconds later, interval.duration for every-N-duration requests, daily/weekdays/weekly/monthly/yearly for solar recurring requests, and lunarYearly for Chinese lunar yearly requests. For daily 22:30 requests, use schedule.kind=daily and time=22:30; if today's time has passed, the recurring schedule naturally starts at the next future occurrence.",
+            "Create a reminder for the current chat sender only. Use once.at for concrete solar times such as next Monday 09:58, once.duration for relative requests such as 2 days 3 hours 4 minutes 5 seconds later, interval.duration for every-N-duration requests, daily/weekdays/weekly/monthly/yearly for solar recurring requests, lunarOnce for one-time Chinese lunar date requests, and lunarYearly for Chinese lunar yearly requests. For daily 22:30 requests, use schedule.kind=daily and time=22:30; if today's time has passed, the recurring schedule naturally starts at the next future occurrence.",
           parameters: addSchema,
           async execute(_toolCallId: string, params: { title: string; message: string; schedule: ReminderSchedule }) {
             try {
+              const identity = requireAllowedIdentity(toolContext, config);
               const record = await addReminder(params, config, api, identity);
               return textResult(`已创建提醒 ${record.id}：${record.title}，时间：${record.displaySchedule}。`, record);
             } catch (error) {
@@ -833,8 +1030,7 @@ export default defineToolPlugin({
         "List active reminders owned by the current chat sender. Never lists reminders for other users.",
       parameters: Type.Object({}),
       factory({ config, toolContext }) {
-        const identity = resolveIdentity(toolContext);
-        if (!identity || !isAllowedIdentity(identity, config)) {
+        if (!shouldExposeReminderTools(toolContext, config)) {
           return null;
         }
         return {
@@ -843,11 +1039,16 @@ export default defineToolPlugin({
           description: "List active reminders owned by the current chat sender only.",
           parameters: Type.Object({}),
           async execute() {
-            const reminders = await listReminders(identity);
-            if (reminders.length === 0) {
-              return textResult("你当前没有活动提醒。");
+            try {
+              const identity = requireAllowedIdentity(toolContext, config);
+              const reminders = await listReminders(identity);
+              if (reminders.length === 0) {
+                return textResult("你当前没有活动提醒。");
+              }
+              return textResult(`你的活动提醒：\n${reminders.map(formatRecord).join("\n")}`, reminders);
+            } catch (error) {
+              return textResult(`查看提醒失败：${error instanceof Error ? error.message : String(error)}`);
             }
-            return textResult(`你的活动提醒：\n${reminders.map(formatRecord).join("\n")}`, reminders);
           },
         };
       },
@@ -859,8 +1060,7 @@ export default defineToolPlugin({
         "Remove one active reminder owned by the current chat sender by id or title. Never removes reminders for other users.",
       parameters: removeSchema,
       factory({ api, config, toolContext }) {
-        const identity = resolveIdentity(toolContext);
-        if (!identity || !isAllowedIdentity(identity, config)) {
+        if (!shouldExposeReminderTools(toolContext, config)) {
           return null;
         }
         return {
@@ -870,6 +1070,7 @@ export default defineToolPlugin({
           parameters: removeSchema,
           async execute(_toolCallId: string, params: { idOrTitle: string }) {
             try {
+              const identity = requireAllowedIdentity(toolContext, config);
               const result = await removeReminder(params.idOrTitle, config, api, identity);
               if (result.ambiguous) {
                 return textResult(

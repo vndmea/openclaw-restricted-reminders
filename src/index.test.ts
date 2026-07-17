@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import entry, { scheduleToHostParams } from "./index.js";
+import entry, { resolveIdentity, scheduleToHostParams, shouldExposeReminderTools } from "./index.js";
 import { getToolPluginMetadata } from "openclaw/plugin-sdk/tool-plugin";
 
 describe("restricted-reminders", () => {
@@ -88,5 +88,39 @@ describe("restricted-reminders", () => {
     expect(result.hosts.length).toBeGreaterThan(0);
     expect(result.hosts[0]).toMatchObject({ deleteAfterRun: true });
     expect(result.display).toContain("lunar yearly on 3-22");
+  });
+
+  it("converts one-time lunar reminders to the next future solar date", () => {
+    const result = scheduleToHostParams(
+      { kind: "lunarOnce", lunarMonth: 6, lunarDay: 4, time: "23:59" },
+      { defaultTimezone: "Asia/Shanghai" },
+    );
+    expect(result.host.at?.toISOString()).toBe("2026-07-17T15:59:00.000Z");
+    expect(result.display).toContain("lunar once on 6-4");
+    expect(result.display).toContain("2026-07-17 23:59");
+  });
+
+  it("resolves channel aliases from OpenClaw chat context variants", () => {
+    const identity = resolveIdentity({
+      messageProvider: "weixin",
+      requesterSenderId: "wx-user",
+      sessionKey: "agent:main:openclaw-weixin:wx-user",
+    } as any);
+    expect(identity).toMatchObject({
+      channel: "weixin",
+      senderId: "wx-user",
+      sessionKey: "agent:main:openclaw-weixin:wx-user",
+    });
+    expect(shouldExposeReminderTools({
+      currentChannelProvider: "weixin",
+      requesterSenderId: "wx-user",
+      sessionKey: "agent:main:openclaw-weixin:wx-user",
+    } as any, { allowedChannels: ["openclaw-weixin"] })).toBe(true);
+  });
+
+  it("keeps tools visible before sender identity is attached", () => {
+    expect(shouldExposeReminderTools({
+      currentChannelProvider: "openclaw-weixin",
+    } as any, { allowedChannels: ["openclaw-weixin"] })).toBe(true);
   });
 });

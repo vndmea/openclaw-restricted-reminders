@@ -37,9 +37,10 @@ The tools are registered only when OpenClaw provides a trusted inbound channel, 
 | "Remind me every Monday at 09:58" | `weekly` |
 | "Remind me on the 22nd of every month at 09:58" | `monthly` |
 | "Remind me every year on March 22 at 09:58" | `yearly` |
+| "Remind me on lunar June 4 at 11:00" | `lunarOnce` |
 | "Remind me every lunar March 22 at 09:58" | `lunarYearly` |
 
-For lunar yearly reminders, the plugin uses [`lunar-javascript`](https://github.com/6tail/lunar-javascript) to convert future lunar dates into concrete solar dates, then pre-schedules one-shot jobs for the configured number of future years.
+For one-time lunar reminders, the plugin schedules the next future occurrence of that lunar date. For lunar yearly reminders, the plugin uses [`lunar-javascript`](https://github.com/6tail/lunar-javascript) to convert future lunar dates into concrete solar dates, then pre-schedules one-shot jobs for the configured number of future years.
 
 ## Build
 
@@ -63,6 +64,7 @@ Then ask through an allowed channel:
 
 ```text
 Remind me next Monday at 09:58 to grab coupons
+Remind me on lunar June 4 at 11:00
 Remind me in 2 days 3 hours 4 minutes 5 seconds to check the server
 Remind me every 2 minutes to report the time
 What reminders do I have?
