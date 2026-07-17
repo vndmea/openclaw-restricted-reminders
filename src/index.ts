@@ -833,6 +833,10 @@ async function runOpenClawCli(config: PluginConfig, args: string[]) {
   return stdout;
 }
 
+export function cronRemoveArgs(jobId: string) {
+  return ["cron", "rm", jobId];
+}
+
 function parseCronAddJson(stdout: string) {
   const parsed = JSON.parse(stdout) as { id?: string; job?: { id?: string } };
   const id = parsed.id ?? parsed.job?.id;
@@ -993,15 +997,15 @@ async function removeReminder(
     return { removed: [], ambiguous: true, candidates };
   }
   const [record] = candidates;
-  if (api.session.workflow.unscheduleSessionTurnsByTag) {
+  if (record.schedulerJobIds?.length || record.schedulerJobId) {
+    for (const jobId of record.schedulerJobIds ?? [record.schedulerJobId!]) {
+      await runOpenClawCli(config, cronRemoveArgs(jobId));
+    }
+  } else if (api.session.workflow.unscheduleSessionTurnsByTag) {
     await api.session.workflow.unscheduleSessionTurnsByTag({
       sessionKey: record.sessionKey,
       tag: record.tag,
     });
-  } else if (record.schedulerJobIds?.length || record.schedulerJobId) {
-    for (const jobId of record.schedulerJobIds ?? [record.schedulerJobId!]) {
-      await runOpenClawCli(config, ["cron", "rm", jobId, "--json"]);
-    }
   } else {
     throw new Error("OpenClaw did not expose reminder removal and no cron job id is stored.");
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import entry, { resolveIdentity, scheduleToHostParams, shouldExposeReminderTools } from "./index.js";
+import entry, { cronRemoveArgs, resolveIdentity, scheduleToHostParams, shouldExposeReminderTools } from "./index.js";
 import { getToolPluginMetadata } from "openclaw/plugin-sdk/tool-plugin";
 
 describe("restricted-reminders", () => {
@@ -33,6 +33,10 @@ describe("restricted-reminders", () => {
       deleteAfterRun: false,
     });
     expect(result.host).not.toHaveProperty("tz");
+  });
+
+  it("uses OpenClaw cron rm without unsupported json flags", () => {
+    expect(cronRemoveArgs("job-1")).toEqual(["cron", "rm", "job-1"]);
   });
 
   it("allows one-shot reminders starting at one minute by default", () => {
