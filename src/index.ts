@@ -391,6 +391,7 @@ function channelAliases(channel: string) {
 
 function resolveContextChannel(ctx: OpenClawPluginToolContext) {
   const raw = ctx as Record<string, any>;
+  const sessionKey = resolveContextSessionKey(ctx);
   return firstString(
     ctx.messageChannel,
     raw.messageProvider,
@@ -402,11 +403,47 @@ function resolveContextChannel(ctx: OpenClawPluginToolContext) {
     raw.deliveryContext?.messageChannel,
     raw.deliveryContext?.messageProvider,
     raw.deliveryContext?.currentChannelProvider,
+    parseSessionKey(sessionKey)?.channel,
   );
+}
+
+function resolveContextSessionKey(ctx: OpenClawPluginToolContext) {
+  const raw = ctx as Record<string, any>;
+  return firstString(
+    ctx.sessionKey,
+    raw.currentSessionKey,
+    raw.conversationSessionKey,
+    raw.policySessionKey,
+    raw.runSessionKey,
+    raw.toolContext?.sessionKey,
+    raw.toolContext?.currentSessionKey,
+    raw.deliveryContext?.sessionKey,
+    raw.deliveryContext?.policySessionKey,
+  );
+}
+
+function parseSessionKey(sessionKey?: string) {
+  if (!sessionKey) {
+    return null;
+  }
+  const parts = sessionKey.split(":");
+  if (parts.length < 4) {
+    return null;
+  }
+  const channelIndex = parts.findIndex((part) => channelAliases(part).some((alias) => DEFAULT_ALLOWED_CHANNELS.includes(alias)));
+  if (channelIndex < 0 || channelIndex >= parts.length - 1) {
+    return null;
+  }
+  return {
+    channel: parts[channelIndex],
+    senderId: parts.slice(channelIndex + 1).join(":"),
+  };
 }
 
 export function resolveIdentity(ctx: OpenClawPluginToolContext): Identity | null {
   const raw = ctx as Record<string, any>;
+  const sessionKey = resolveContextSessionKey(ctx);
+  const sessionIdentity = parseSessionKey(sessionKey);
   const channel = resolveContextChannel(ctx);
   const senderId = firstString(
     ctx.requesterSenderId,
@@ -420,13 +457,7 @@ export function resolveIdentity(ctx: OpenClawPluginToolContext): Identity | null
     raw.toolContext?.senderId,
     raw.deliveryContext?.requesterSenderId,
     raw.deliveryContext?.senderId,
-  );
-  const sessionKey = firstString(
-    ctx.sessionKey,
-    raw.currentSessionKey,
-    raw.conversationSessionKey,
-    raw.toolContext?.sessionKey,
-    raw.deliveryContext?.sessionKey,
+    sessionIdentity?.senderId,
   );
   if (!channel || !senderId || !sessionKey) {
     return null;

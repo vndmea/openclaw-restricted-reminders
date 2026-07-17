@@ -123,4 +123,16 @@ describe("restricted-reminders", () => {
       currentChannelProvider: "openclaw-weixin",
     } as any, { allowedChannels: ["openclaw-weixin"] })).toBe(true);
   });
+
+  it("derives the sender from OpenClaw channel session keys", () => {
+    const identity = resolveIdentity({
+      toolContext: { currentChannelProvider: "openclaw-weixin" },
+      sessionKey: "agent:main:openclaw-weixin:o9cq803_C5cZw3tdRWmG3avNjwzc@im.wechat",
+    } as any);
+    expect(identity).toMatchObject({
+      channel: "openclaw-weixin",
+      senderId: "o9cq803_C5cZw3tdRWmG3avNjwzc@im.wechat",
+      sessionKey: "agent:main:openclaw-weixin:o9cq803_C5cZw3tdRWmG3avNjwzc@im.wechat",
+    });
+  });
 });
